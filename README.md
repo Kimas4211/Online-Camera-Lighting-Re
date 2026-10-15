@@ -1,29 +1,23 @@
-# Luma · 实时人脸补光
+# Luma · 浏览器场景重光照 v0.3
 
-在浏览器内运行的摄像头补光实验。基于 MediaPipe 人脸三维关键点和 WebGL 表面法线补光；不模拟真实投射阴影。
+摄像头 → Depth Anything V2 Small 深度估计 → 全画面法线、点光源及屏幕空间遮挡。
+
+## 与旧版本的区别
+
+不再使用 MediaPipe 人脸面片或人脸区域遮罩。头发、衣服、手和背景使用同一个深度场渲染，避免面具边缘。模型估计的是相对深度，不能恢复真实材质或完整三维场景；细小物体、眼镜、快速运动及深度边缘仍可能出错。并不保证复制任何参考演示的效果。
 
 ## 使用
 
-打开 GitHub Pages 地址，点击「开启摄像头」并授权。拖动光球，调整亮度、柔和度、距离和颜色。支持原图对比、镜像、人脸网格以及本地 PNG 导出。
+需要支持 WebGPU 且开启硬件加速的浏览器。打开网页，点击开启摄像头；首次加载约 50 MB 深度模型。拖动光球调整位置，使用“灯光前后位置”改变光源与被摄对象的前后关系。“查看场景深度”可验证模型是否正常工作。视频、深度推理与渲染均在本机完成，不上传摄像头数据。不请求麦克风。
 
-视频和关键点只在浏览器内处理，不上传。摄像头只请求视频，不请求麦克风。点击关闭摄像头或离开页面会释放设备。
+亮度为零、关闭灯光或原图对比均显示原始画面。关闭摄像头或离开页面会释放设备。
 
-## 发布
+## 开发与发布
 
-仓库 Settings → Pages → Build and deployment → Source 选择 GitHub Actions。推送 main 后由 `.github/workflows/pages.yml` 自动发布。若仓库使用其他默认分支，应同步修改工作流分支。
+Node.js 22+：`npm ci`，`npm run build`。构建会从固定 Hugging Face 模型提交下载权重，并将 Transformers.js、ONNX Runtime、WASM 与模型打包到 `site/`，运行时从网页自身地址加载。然后在 `site/` 中运行 `python -m http.server 8000`，打开 http://localhost:8000 。
 
-## 本地运行
+GitHub Pages 的 Source 选择 GitHub Actions。main 分支推送后自动构建发布。
 
-先运行 `python download-assets.py` 下载并校验固定版本的模型和运行库，然后在项目根目录运行 `python -m http.server 8000`，打开 http://localhost:8000 。摄像头需要 HTTPS 或 localhost，不能直接双击 HTML 使用。
+## 检查范围
 
-## 文件
-
-- `index.html` / `style.css`：界面。
-- `app.js`：摄像头、交互、人脸追踪与 WebGL 补光。
-- `download-assets.py` / `asset-checksums.json`：发布时下载并校验运行资源，随后所有资源从当前网站同源加载。浏览器不依赖外部 CDN。
-
-MediaPipe 项目：https://github.com/google-ai-edge/mediapipe 。依赖的第三方许可见 `THIRD_PARTY_NOTICES.md`。
-
-## 验证范围
-
-JavaScript 语法、界面引用和模型文件完整性已检查；实际摄像头、WebGL 视觉表现及设备性能仍需在目标浏览器实测。
+语法、构建和发布检查与实际浏览器视觉验证分开。深度推理速度取决于 GPU；灯光交互的刷新率与深度更新频率不同。尚未完成真实摄像头与目标 GPU 的端到端效果验收。
