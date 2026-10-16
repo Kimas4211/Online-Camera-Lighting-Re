@@ -68,14 +68,16 @@ const u=Object.fromEntries(['frame','depthMap','mirror','aspect','power','softne
 function makeTexture(unit){gl.activeTexture(gl.TEXTURE0+unit);let t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);return t}
 const imageTexture=makeTexture(0),depthTexture=makeTexture(1);gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,1,1,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,new Uint8Array([128]));gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
 const demoCanvas=document.createElement('canvas');demoCanvas.width=960;demoCanvas.height=720;const dc=demoCanvas.getContext('2d');let gradient=dc.createLinearGradient(0,0,960,720);gradient.addColorStop(0,'#35313f');gradient.addColorStop(1,'#171c24');dc.fillStyle=gradient;dc.fillRect(0,0,960,720);dc.strokeStyle='#9e86bb22';for(let x=-600;x<1600;x+=70){dc.beginPath();dc.moveTo(x,0);dc.lineTo(x+500,720);dc.stroke()}
+let runtimeDtype='';
 function runtime(){if(ready)return Promise.resolve();if(loading)return loading;
  loading=new Promise((resolve,reject)=>{
-  worker=new Worker(new URL('./depth-worker.bundle.js',import.meta.url),{type:'module'});
+  worker=new Worker(new URL('./depth-worker.bundle.js?v=0.3.1',import.meta.url),{type:'module'});
   let initTimer=setTimeout(()=>{worker?.terminate();worker=null;loading=null;reject(Error('模型加载超时，请检查网络后重试'))},180000);
   worker.onerror=e=>{clearTimeout(initTimer);loading=null;busy=false;reject(Error(e.message||'深度引擎无法启动'));if(!demo)toast('深度引擎异常，请关闭摄像头后重试')};
   worker.onmessage=({data:m})=>{
+   if(m.type==='notice'){$('status').textContent='◌ '+m.message;return;}
    if(m.type==='progress'){$('status').textContent=`◌ 正在加载本地深度模型 ${m.value}%`;return;}
-   if(m.type==='ready'){clearTimeout(initTimer);ready=true;resolve();return;}
+   if(m.type==='ready'){clearTimeout(initTimer);runtimeDtype=m.dtype.toUpperCase();ready=true;resolve();return;}
    if(m.type==='error'){busy=false;if(!ready){clearTimeout(initTimer);loading=null;worker.terminate();worker=null;reject(Error(m.message))}else{$('status').textContent='深度估计失败';toast(m.message);stopCamera()}return;}
    if(m.type==='depth'){
     busy=false;if(m.epoch!==epoch||demo)return;
@@ -83,7 +85,7 @@ function runtime(){if(ready)return Promise.resolve();if(loading)return loading;
     const packed=new Uint8Array(incoming.length);
     for(let i=0;i<incoming.length;i++){let change=Math.abs(incoming[i]-depthValues[i]);let alpha=change>.12?.82:.45;depthValues[i]+=alpha*(incoming[i]-depthValues[i]);packed[i]=Math.round(depthValues[i]*255);}
     depthWidth=m.width;depthHeight=m.height;gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,depthTexture);gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,m.width,m.height,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,packed);depthValid=true;
-    $('track').textContent='● 全画面深度 · WebGPU';$('status').textContent=`● 场景重光照 v0.3 · 深度 ${Math.round(m.ms)} ms`;
+    $('track').textContent='● 全画面深度 · WebGPU / '+runtimeDtype;$('status').textContent=`● 场景重光照 v0.3.1 · ${runtimeDtype} · 深度 ${Math.round(m.ms)} ms`;
    }
   };worker.postMessage({type:'init'});
  });return loading;

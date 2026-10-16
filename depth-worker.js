@@ -1,16 +1,21 @@
 import {AutoModelForDepthEstimation,AutoProcessor,RawImage,env} from '@huggingface/transformers';
+import {loadDepthModel} from './gpu-model.js';
 const root=new URL('./',self.location.href).href;
 env.allowRemoteModels=false;env.allowLocalModels=true;env.localModelPath=root+'assets/models/';
 env.backends.onnx.wasm.wasmPaths=root+'assets/ort/';env.backends.onnx.wasm.numThreads=1;env.backends.onnx.wasm.proxy=false;
-let model,processor,offscreen,ctx;
+let model,processor,offscreen,ctx,dtype='fp32';
 self.onmessage=async({data:m})=>{
  let inputs,result;
  try{
   if(m.type==='init'){
-   if(!navigator.gpu)throw Error('全画面重光照需要 WebGPU，请使用支持 WebGPU 的 Chrome 或 Edge。');
    processor=await AutoProcessor.from_pretrained('depth-anything');
-   model=await AutoModelForDepthEstimation.from_pretrained('depth-anything',{device:'webgpu',dtype:'fp16',progress_callback:p=>{if(p.status==='progress')self.postMessage({type:'progress',value:Math.round(p.progress||0)})}});
-   self.postMessage({type:'ready'});return;
+   const runtime=await loadDepthModel({
+    gpu:navigator.gpu,
+    load:precision=>AutoModelForDepthEstimation.from_pretrained('depth-anything',{device:'webgpu',dtype:precision,progress_callback:p=>{if(p.status==='progress')self.postMessage({type:'progress',value:Math.round(p.progress||0)})}}),
+    onNotice:message=>self.postMessage({type:'notice',message})
+   });
+   model=runtime.model;dtype=runtime.dtype;
+   self.postMessage({type:'ready',dtype});return;
   }
   if(m.type!=='frame')return;
   const started=performance.now();
