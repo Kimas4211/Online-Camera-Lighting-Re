@@ -9,6 +9,7 @@ uniform sampler2D frame,depthMap;
 uniform float mirror,aspect,power,softness,height,relightEnabled,debugDepth;
 uniform vec2 bulb,texel;
 uniform vec3 color;
+uniform float lightSurface;
 varying vec2 uv;
 vec2 sourceUV(vec2 p){return vec2(mix(p.x,1.-p.x,mirror),p.y);}
 float rawDepth(vec2 p){return texture2D(depthMap,clamp(sourceUV(p),.001,.999)).r;}
@@ -31,22 +32,33 @@ void main(){
  vec2 stepUV=max(texel*1.5,vec2(.003));
  float dzdx=(depth(uv+vec2(stepUV.x,0.))-depth(uv-vec2(stepUV.x,0.)))*.40;
  float dzdy=(depth(uv+vec2(0.,stepUV.y))-depth(uv-vec2(0.,stepUV.y)))*.40;
- vec3 N=normalize(vec3(-dzdx/(2.*stepUV.x*aspect),dzdy/(2.*stepUV.y),1.));
+ float edgeJump=max(abs(dzdx),abs(dzdy))/.40;
+ float surfaceConfidence=1.-smoothstep(.035,.16,edgeJump);
+ vec2 slope=vec2(-dzdx/(2.*stepUV.x*aspect),dzdy/(2.*stepUV.y));
+ slope*=min(1.,2./max(length(slope),.0001));
+ vec3 N=normalize(vec3(slope*surfaceConfidence,1.));
  // Height is a signed offset from the scene surface at the light's screen position.
- vec3 lamp=point(bulb);lamp.z+=(height-.70)*.80;
+ vec3 lamp=vec3((bulb.x-.5)*aspect,.5-bulb.y,lightSurface*.40+(height-.70)*.80);
  vec3 delta=lamp-P;float distance2=dot(delta,delta);
  vec3 L=normalize(delta+vec3(0.,0.,.0001));
  float wrap=mix(.01,.48,softness);
  float diffuse=max(0.,(dot(N,L)+wrap)/(1.+wrap));
  float visibility=1.;
- // Test the 2.5D depth field along the path towards the bulb.
+ // Reject cast-shadow estimates across discontinuous or hidden geometry.
+ // Keep only weak, soft contact shading on continuous depth surfaces.
+ float previousDepth=d,continuity=surfaceConfidence,occlusion=0.;
  for(int i=1;i<=16;i++){
   float t=float(i)/17.;vec2 rayUV=mix(uv,bulb,t);
-  float rayZ=mix(P.z,lamp.z,t);float blocker=depth(rayUV)*.40;
-  float bias=.012+softness*.025+t*.008;
-  float blocked=smoothstep(bias,bias+.025+softness*.025,blocker-rayZ);
-  visibility=min(visibility,1.-blocked*.85);
+  float rayDepth=depth(rayUV);
+  continuity=min(continuity,1.-smoothstep(.035,.12,abs(rayDepth-previousDepth)));
+  previousDepth=rayDepth;
+  float rayZ=mix(P.z,lamp.z,t);
+  float bias=.025+softness*.035+t*.012;
+  float blocked=smoothstep(bias,bias+.045+softness*.035,rayDepth*.40-rayZ);
+  float nearContact=1.-smoothstep(.15,.60,length((rayUV-uv)*vec2(aspect,1.)));
+  occlusion=max(occlusion,blocked*nearContact);
  }
+ visibility=1.-occlusion*continuity*mix(.24,.10,softness);
  float attenuation=1./(1.+distance2*5.);
  float fill=mix(.30,.52,softness);
  float key=diffuse*visibility*attenuation*power*2.5;
@@ -64,7 +76,7 @@ void main(){
 function compile(type,source){let shader=gl.createShader(type);gl.shaderSource(shader,source);gl.compileShader(shader);if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(shader));return shader}
 const program=gl.createProgram();gl.attachShader(program,compile(gl.VERTEX_SHADER,vs));gl.attachShader(program,compile(gl.FRAGMENT_SHADER,fs));gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));gl.useProgram(program);
 const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);let attr=gl.getAttribLocation(program,'position');gl.enableVertexAttribArray(attr);gl.vertexAttribPointer(attr,2,gl.FLOAT,false,0,0);
-const u=Object.fromEntries(['frame','depthMap','mirror','aspect','power','softness','height','relightEnabled','debugDepth','bulb','texel','color'].map(k=>[k,gl.getUniformLocation(program,k)]));
+const u=Object.fromEntries(['frame','depthMap','mirror','aspect','power','softness','height','relightEnabled','debugDepth','bulb','texel','color','lightSurface'].map(k=>[k,gl.getUniformLocation(program,k)]));
 function makeTexture(unit){gl.activeTexture(gl.TEXTURE0+unit);let t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);return t}
 const imageTexture=makeTexture(0),depthTexture=makeTexture(1);gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,1,1,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,new Uint8Array([128]));gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
 const demoCanvas=document.createElement('canvas');demoCanvas.width=960;demoCanvas.height=720;const dc=demoCanvas.getContext('2d');let gradient=dc.createLinearGradient(0,0,960,720);gradient.addColorStop(0,'#35313f');gradient.addColorStop(1,'#171c24');dc.fillStyle=gradient;dc.fillRect(0,0,960,720);dc.strokeStyle='#9e86bb22';for(let x=-600;x<1600;x+=70){dc.beginPath();dc.moveTo(x,0);dc.lineTo(x+500,720);dc.stroke()}
@@ -85,7 +97,7 @@ function runtime(){if(ready)return Promise.resolve();if(loading)return loading;
     const packed=new Uint8Array(incoming.length);
     for(let i=0;i<incoming.length;i++){let change=Math.abs(incoming[i]-depthValues[i]);let alpha=change>.12?.82:.45;depthValues[i]+=alpha*(incoming[i]-depthValues[i]);packed[i]=Math.round(depthValues[i]*255);}
     depthWidth=m.width;depthHeight=m.height;gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,depthTexture);gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,m.width,m.height,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,packed);depthValid=true;
-    $('track').textContent='● 全画面深度 · WebGPU / '+runtimeDtype;$('status').textContent=`● 场景重光照 v0.3.1 · ${runtimeDtype} · 深度 ${Math.round(m.ms)} ms`;
+    $('track').textContent='● 全画面深度 · WebGPU / '+runtimeDtype;$('status').textContent=`● 场景重光照 v0.3.2 · ${runtimeDtype} · 深度 ${Math.round(m.ms)} ms`;
    }
   };worker.postMessage({type:'init'});
  });return loading;
@@ -94,7 +106,19 @@ async function infer(now){if(demo||!ready||busy||video.readyState<2||now-lastInf
  busy=true;lastInference=now;lastFrameTime=video.currentTime;const token=epoch;
  try{const bitmap=await createImageBitmap(video,{resizeWidth:392,resizeHeight:Math.round(392*video.videoHeight/video.videoWidth)});if(token!==epoch||demo){bitmap.close();busy=false;return}worker.postMessage({type:'frame',bitmap,width:bitmap.width,height:bitmap.height,epoch:token},[bitmap]);}
  catch(e){busy=false;toast('读取摄像头帧失败：'+e.message);stopCamera()}}
+let smoothedLightSurface=.5,previousRenderTime=0;
 function render(now){requestAnimationFrame(render);if(document.hidden)return;const source=demo?demoCanvas:video;if(!demo&&video.readyState<2)return;infer(now);
+ // Smooth the depth anchor so dragging over a silhouette cannot teleport the lamp.
+ if(depthValid&&depthValues){
+  const sx=(mirrored?1-light.x:light.x)*(depthWidth-1),sy=light.y*(depthHeight-1);
+  const x0=Math.floor(sx),y0=Math.floor(sy),x1=Math.min(x0+1,depthWidth-1),y1=Math.min(y0+1,depthHeight-1),fx=sx-x0,fy=sy-y0;
+  const target=(depthValues[y0*depthWidth+x0]*(1-fx)+depthValues[y0*depthWidth+x1]*fx)*(1-fy)+(depthValues[y1*depthWidth+x0]*(1-fx)+depthValues[y1*depthWidth+x1]*fx)*fy;
+  const dt=Math.min(.05,Math.max(0,(now-previousRenderTime)/1000));
+  const step=(target-smoothedLightSurface)*(1-Math.exp(-dt/.16));
+  smoothedLightSurface+=Math.max(-dt*1.2,Math.min(dt*1.2,step));
+ }
+ previousRenderTime=now;
+ gl.uniform1f(u.lightSurface,smoothedLightSurface);
  gl.viewport(0,0,canvas.width,canvas.height);gl.useProgram(program);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,imageTexture);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGB,gl.RGB,gl.UNSIGNED_BYTE,source);gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,depthTexture);
  gl.uniform1i(u.frame,0);gl.uniform1i(u.depthMap,1);gl.uniform1f(u.mirror,!demo&&mirrored?1:0);gl.uniform1f(u.aspect,canvas.width/canvas.height);gl.uniform1f(u.power,+$('power').value/100);gl.uniform1f(u.softness,+$('soft').value/100);gl.uniform1f(u.height,+$('depth').value/100);gl.uniform1f(u.relightEnabled,!demo&&depthValid&&enabled&&!comparison?1:0);gl.uniform1f(u.debugDepth,$('mesh').checked?1:0);gl.uniform2f(u.bulb,light.x,light.y);gl.uniform2f(u.texel,1/depthWidth,1/depthHeight);gl.uniform3fv(u.color,$('color').value.match(/\w\w/g).map(x=>parseInt(x,16)/255));gl.drawArrays(gl.TRIANGLES,0,6);
 }requestAnimationFrame(render);
