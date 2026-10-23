@@ -13,13 +13,29 @@ uniform float lightSurface;
 varying vec2 uv;
 vec2 sourceUV(vec2 p){return vec2(mix(p.x,1.-p.x,mirror),p.y);}
 float rawDepth(vec2 p){return texture2D(depthMap,clamp(sourceUV(p),.001,.999)).r;}
+// Upsample the coarse depth using the full-resolution camera's color edges.
 float depth(vec2 p){
- float c=rawDepth(p),sum=c,total=1.;
- for(int i=0;i<4;i++){
-  vec2 offset=i==0?vec2(texel.x,0.):i==1?vec2(-texel.x,0.):i==2?vec2(0.,texel.y):vec2(0.,-texel.y);
-  float d=rawDepth(p+offset),w=exp(-abs(d-c)*22.);sum+=d*w;total+=w;
+ vec2 sampleUV=clamp(sourceUV(p),texel*.5,1.-texel*.5);
+ vec3 guide=texture2D(frame,sampleUV).rgb;
+ vec2 base=floor(sampleUV/texel-.5)+.5;
+ float sum=0.,total=0.;
+ for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++){
+  vec2 q=clamp((base+vec2(float(x),float(y)))*texel,texel*.5,1.-texel*.5);
+  vec3 diff=texture2D(frame,q).rgb-guide;
+  vec2 distance=(q-sampleUV)/texel;
+  float weight=exp(-dot(diff,diff)*65.-dot(distance,distance)*.65);
+  sum+=texture2D(depthMap,q).r*weight;total+=weight;
  }
- return sum/total;
+ return total>.000001?sum/total:texture2D(depthMap,sampleUV).r;
+}
+float surfaceDerivative(vec2 p,vec2 offset,float centerDepth,vec3 centerColor){
+ float before=centerDepth-depth(p-offset),after=depth(p+offset)-centerDepth;
+ vec3 c0=texture2D(frame,sourceUV(p-offset)).rgb-centerColor;
+ vec3 c1=texture2D(frame,sourceUV(p+offset)).rgb-centerColor;
+ float w0=(1.-smoothstep(.025,.09,abs(before)))*exp(-dot(c0,c0)*40.);
+ float w1=(1.-smoothstep(.025,.09,abs(after)))*exp(-dot(c1,c1)*40.);
+ // Use a same-surface one-sided derivative at silhouettes instead of a false wall.
+ return (before*w0+after*w1)/max(w0+w1,.15);
 }
 vec3 point(vec2 p){return vec3((p.x-.5)*aspect,.5-p.y,depth(p)*.40);}
 void main(){
@@ -29,14 +45,14 @@ void main(){
  if(debugDepth>.5){gl_FragColor=vec4(vec3(d),1.);return;}
  if(power<=0.){gl_FragColor=vec4(original,1.);return;}
  vec3 P=vec3((uv.x-.5)*aspect,.5-uv.y,d*.40);
- vec2 stepUV=max(texel*1.5,vec2(.003));
- float dzdx=(depth(uv+vec2(stepUV.x,0.))-depth(uv-vec2(stepUV.x,0.)))*.40;
- float dzdy=(depth(uv+vec2(0.,stepUV.y))-depth(uv-vec2(0.,stepUV.y)))*.40;
- float edgeJump=max(abs(dzdx),abs(dzdy))/.40;
- float surfaceConfidence=1.-smoothstep(.035,.16,edgeJump);
- vec2 slope=vec2(-dzdx/(2.*stepUV.x*aspect),dzdy/(2.*stepUV.y));
+ vec2 stepUV=max(texel,vec2(.002));
+ float sx=surfaceDerivative(uv,vec2(stepUV.x,0.),d,original)*.40/(stepUV.x*aspect);
+ float sy=surfaceDerivative(uv,vec2(0.,stepUV.y),d,original)*.40/stepUV.y;
+ float edgeJump=max(abs(rawDepth(uv+vec2(texel.x,0.))-rawDepth(uv-vec2(texel.x,0.))),abs(rawDepth(uv+vec2(0.,texel.y))-rawDepth(uv-vec2(0.,texel.y))));
+ float surfaceConfidence=1.-smoothstep(.035,.12,edgeJump);
+ vec2 slope=vec2(-sx,sy);
  slope*=min(1.,2./max(length(slope),.0001));
- vec3 N=normalize(vec3(slope*surfaceConfidence,1.));
+ vec3 N=normalize(vec3(slope,1.));
  // Height is a signed offset from the scene surface at the light's screen position.
  vec3 lamp=vec3((bulb.x-.5)*aspect,.5-bulb.y,lightSurface*.40+(height-.70)*.80);
  vec3 delta=lamp-P;float distance2=dot(delta,delta);
@@ -49,7 +65,7 @@ void main(){
  float previousDepth=d,continuity=surfaceConfidence,occlusion=0.;
  for(int i=1;i<=16;i++){
   float t=float(i)/17.;vec2 rayUV=mix(uv,bulb,t);
-  float rayDepth=depth(rayUV);
+  float rayDepth=rawDepth(rayUV);
   continuity=min(continuity,1.-smoothstep(.035,.12,abs(rayDepth-previousDepth)));
   previousDepth=rayDepth;
   float rayZ=mix(P.z,lamp.z,t);
@@ -95,9 +111,16 @@ function runtime(){if(ready)return Promise.resolve();if(loading)return loading;
     busy=false;if(m.epoch!==epoch||demo)return;
     const incoming=m.pixels;if(depthValues?.length!==incoming.length)depthValues=new Float32Array(incoming);
     const packed=new Uint8Array(incoming.length);
-    for(let i=0;i<incoming.length;i++){let change=Math.abs(incoming[i]-depthValues[i]);let alpha=change>.12?.82:.45;depthValues[i]+=alpha*(incoming[i]-depthValues[i]);packed[i]=Math.round(depthValues[i]*255);}
+    for(let i=0;i<incoming.length;i++){
+     const x=i%m.width,y=Math.floor(i/m.width),value=incoming[i];
+     const jump=Math.max(Math.abs(value-incoming[y*m.width+Math.max(0,x-1)]),Math.abs(value-incoming[y*m.width+Math.min(m.width-1,x+1)]),Math.abs(value-incoming[Math.max(0,y-1)*m.width+x]),Math.abs(value-incoming[Math.min(m.height-1,y+1)*m.width+x]));
+     const change=Math.abs(value-depthValues[i]);
+     // Do not leave temporal trails on moving silhouettes.
+     const alpha=jump>.06||change>.08?1:.55;
+     depthValues[i]+=alpha*(value-depthValues[i]);packed[i]=Math.round(depthValues[i]*255);
+    }
     depthWidth=m.width;depthHeight=m.height;gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,depthTexture);gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,m.width,m.height,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,packed);depthValid=true;
-    $('track').textContent='● 全画面深度 · WebGPU / '+runtimeDtype;$('status').textContent=`● 场景重光照 v0.3.2 · ${runtimeDtype} · 深度 ${Math.round(m.ms)} ms`;
+    $('track').textContent='● 全画面深度 · WebGPU / '+runtimeDtype;$('status').textContent=`● 场景重光照 v0.3.3 · ${runtimeDtype} · 深度 ${Math.round(m.ms)} ms`;
    }
   };worker.postMessage({type:'init'});
  });return loading;
