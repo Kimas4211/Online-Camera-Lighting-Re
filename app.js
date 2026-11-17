@@ -75,17 +75,40 @@ void main(){
   occlusion=max(occlusion,blocked*nearContact);
  }
  visibility=1.-occlusion*continuity*mix(.24,.10,softness);
- float attenuation=1./(1.+distance2*5.);
- float fill=mix(.30,.52,softness);
- float key=diffuse*visibility*attenuation*power*2.5;
+ // Directional key light for the subject / nearby geometry.
+ float attenuation=1./(1.+distance2*4.4);
+ float key=diffuse*visibility*attenuation*power*2.15;
+
+ // Broad environment spill: every visible surface receives a weaker version of
+ // the same lamp. This preserves the real background instead of making the
+ // subject look composited over a static or artificially darkened layer.
+ vec2 screenDelta=(uv-bulb)*vec2(aspect,1.);
+ float screenDistance2=dot(screenDelta,screenDelta);
+ float spatialSpill=1./(1.+screenDistance2*1.35);
+ float depthDelta=abs(d-lightSurface);
+ float depthSpill=mix(.72,1.,1.-smoothstep(.08,.55,depthDelta));
+ float environment=spatialSpill*depthSpill*power*mix(.16,.28,softness);
+
  vec3 tint=pow(max(color,vec3(.01)),vec3(2.2));
  tint/=max(dot(tint,vec3(.2126,.7152,.0722)),.05);
  vec3 linear=pow(original,vec3(2.2));
- vec3 factor=vec3(fill)+key*mix(vec3(1.),tint,.75);
- vec3 lit=linear*factor;
+
+ // Keep most of the original exposure and texture. The key light shapes the
+ // subject while environment spill gently lifts/tints the surrounding room.
+ float base=mix(.84,.94,softness);
+ vec3 keyFactor=key*mix(vec3(1.),tint,.72);
+ vec3 envFactor=environment*mix(vec3(1.),tint,.62);
+ vec3 lit=linear*(vec3(base)+keyFactor+envFactor);
+
+ // A tiny diffuse bounce keeps dark background surfaces connected to the lamp
+ // without flattening contrast or introducing any blur.
+ float luma=dot(linear,vec3(.2126,.7152,.0722));
+ vec3 bounce=tint*environment*(.018+.035*(1.-luma));
+ lit+=bounce;
+
  float peak=max(lit.r,max(lit.g,lit.b));
- if(peak>.85)lit*=(.85+.15*(1.-exp(-(peak-.85)/.15)))/peak;
- // Fade strength continuously to original at zero; no hard face-shaped mask.
+ if(peak>.92)lit*=(.92+.08*(1.-exp(-(peak-.92)/.12)))/peak;
+ // Fade strength continuously to original at zero; no face mask, no background blur.
  vec3 result=mix(linear,lit,smoothstep(0.,.25,power));
  gl_FragColor=vec4(pow(max(result,vec3(0.)),vec3(1./2.2)),1.);
 }`;
@@ -120,7 +143,7 @@ function runtime(){if(ready)return Promise.resolve();if(loading)return loading;
      depthValues[i]+=alpha*(value-depthValues[i]);packed[i]=Math.round(depthValues[i]*255);
     }
     depthWidth=m.width;depthHeight=m.height;gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,depthTexture);gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,m.width,m.height,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,packed);depthValid=true;
-    $('track').textContent='● 全画面深度 · WebGPU / '+runtimeDtype;$('status').textContent=`● 场景重光照 v0.3.3 · ${runtimeDtype} · 深度 ${Math.round(m.ms)} ms`;
+    $('track').textContent='● 全画面深度 · WebGPU / '+runtimeDtype;$('status').textContent=`● 场景重光照 v0.4.0 · ${runtimeDtype} · 深度 ${Math.round(m.ms)} ms`;
    }
   };worker.postMessage({type:'init'});
  });return loading;
